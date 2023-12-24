@@ -355,6 +355,7 @@ def parse_args():
     parser.add_argument("--mclip", action="store_true")
     parser.add_argument("--dataset_splits", type=str, nargs="*")
     parser.add_argument("--prompt_prefix", type=str, required=False, default=None)
+    parser.add_argument("--hf_read", type=str, required=False, default=None)
 
     args = parser.parse_args()
 
@@ -748,7 +749,7 @@ def main(args):
         )
     elif args.instance_data_dataset is not None:
         dataset = HuggingFaceDataset(
-            hf_dataset=load_dataset(args.instance_data_dataset),
+            hf_dataset=load_dataset(args.instance_data_dataset, token=args.hf_read),
             tokenizer=tokenizer,
             image_key=args.image_key,
             prompt_key=args.prompt_key,
