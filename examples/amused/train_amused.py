@@ -21,13 +21,15 @@ import os
 import shutil
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Optional, Union, Tuple
 
 import torch
+import random
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 from PIL import Image
@@ -43,13 +45,96 @@ import diffusers.optimization
 from diffusers import AmusedPipeline, AmusedScheduler, EMAModel, UVit2DModel, VQModel
 from diffusers.loaders import LoraLoaderMixin
 from diffusers.utils import is_wandb_available
+from transformers import AutoModel, AutoTokenizer, PretrainedConfig, PreTrainedModel
+from transformers.models.clip.modeling_clip import CLIPTextModelOutput
+
+
+class MCLIPConfig(PretrainedConfig):
+    model_type = "M-CLIP"
+
+    def __init__(self, modelBase='xlm-roberta-large', transformerDimSize=1024, imageDimSize=768, **kwargs):
+        self.transformerDimensions = transformerDimSize
+        self.numDims = imageDimSize
+        self.modelBase = modelBase
+        super().__init__(**kwargs)
+
+class MultilingualCLIP(PreTrainedModel):
+    config_class = MCLIPConfig
+
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+        self.transformer = AutoModel.from_pretrained(config.modelBase)
+        self.LinearTransformation = torch.nn.Linear(in_features=config.transformerDimensions,
+                                                    out_features=config.numDims)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, CLIPTextModelOutput]:
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        text_outputs = self.transformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooled_output = text_outputs[1]
+
+        text_embeds = self.LinearTransformation(pooled_output)
+
+        if not return_dict:
+            outputs = (text_embeds, text_outputs[0]) + text_outputs[2:]
+            return tuple(output for output in outputs if output is not None)
+
+        return CLIPTextModelOutput(
+            text_embeds=text_embeds,
+            last_hidden_state=text_outputs.last_hidden_state,
+            hidden_states=text_outputs.hidden_states,
+            attentions=text_outputs.attentions,
+        )
+
+    @classmethod
+    def _load_state_dict_into_model(cls, model, state_dict, pretrained_model_name_or_path, _fast_init=True):
+        model.load_state_dict(state_dict)
+        return model, [], [], []
 
 
 if is_wandb_available():
     import wandb
 
 logger = get_logger(__name__, log_level="INFO")
+'''
+python train_amused.py \
+    --pretrained_model_name_or_path "reza-alipour/Muse-Face" \
+    --instance_data_dataset "reza-alipour/M3TM" \
+    --use_8bit_adam \
+    --seed 1337 \
+    --checkpointing_steps 1000 \
+    --checkpoints_total_limit 3 \
+    --train_batch_size 8 \
+    --gradient_accumulation_steps 16 \
+    --learning_rate 5e-5 \
+    --lr_warmup_steps 500 \
+    --validation_steps 100 \
+    --mixed_precision no \
+    --resolution 256 \
+    --validation_prompts """""" \
+    --mclip \
+    --dataset_splits """ \
 
+
+
+'''
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -267,6 +352,8 @@ def parse_args():
         action="store_true",
         help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
     )
+    parser.add_argument("--mclip", action="store_true")
+    parser.add_argument("--dataset_splits", type=str, nargs="*")
     parser.add_argument("--prompt_prefix", type=str, required=False, default=None)
 
     args = parser.parse_args()
@@ -350,23 +437,36 @@ class HuggingFaceDataset(Dataset):
         prompt_key,
         prompt_prefix=None,
         size=512,
+        splits="train"
     ):
+        if splits.__class__ == str:
+            splits = [splits]
         self.size = size
         self.image_key = image_key
         self.prompt_key = prompt_key
         self.tokenizer = tokenizer
-        self.hf_dataset = hf_dataset
+        self.hf_dataset = concatenate_datasets([hf_dataset[s] for s in splits])
         self.prompt_prefix = prompt_prefix
 
     def __len__(self):
         return len(self.hf_dataset)
 
     def __getitem__(self, index):
+        item_type = random.randint(0, 2)
+        if item_type == 0:
+            image_key = 'image'
+            prefix = ''
+        elif item_type == 1:
+            image_key = 'mask'
+            prefix = 'Mask | '
+        else:
+            image_key = 'landmark'
+            prefix = 'Landmark | '
         item = self.hf_dataset[index]
 
-        rv = process_image(item[self.image_key], self.size)
+        rv = process_image(item[image_key], self.size)
 
-        prompt = item[self.prompt_key]
+        prompt = prefix + random.choice(item['captions_all'])
 
         if self.prompt_prefix is not None:
             prompt = self.prompt_prefix + prompt
@@ -449,12 +549,20 @@ def main(args):
         set_seed(args.seed)
 
     # TODO - will have to fix loading if training text encoder
-    text_encoder = CLIPTextModelWithProjection.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
-    tokenizer = CLIPTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, variant=args.variant
-    )
+    if args.mclip:
+        text_encoder = MultilingualCLIP.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, variant=args.variant
+        )
+    else:
+        text_encoder = CLIPTextModelWithProjection.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        )
+        tokenizer = CLIPTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, variant=args.variant
+        )
     vq_model = VQModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vqvae", revision=args.revision, variant=args.variant
     )
@@ -640,12 +748,13 @@ def main(args):
         )
     elif args.instance_data_dataset is not None:
         dataset = HuggingFaceDataset(
-            hf_dataset=load_dataset(args.instance_data_dataset, split="train"),
+            hf_dataset=load_dataset(args.instance_data_dataset),
             tokenizer=tokenizer,
             image_key=args.image_key,
             prompt_key=args.prompt_key,
             prompt_prefix=args.prompt_prefix,
             size=args.resolution,
+            splits=args.dataset_splits
         )
     else:
         assert False
