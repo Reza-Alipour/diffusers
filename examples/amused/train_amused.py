@@ -26,6 +26,7 @@ from typing import Optional, Union, Tuple
 import torch
 import random
 import torch.nn.functional as F
+from huggingface_hub import HfApi
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
@@ -356,6 +357,7 @@ def parse_args():
     parser.add_argument("--dataset_splits", type=str, nargs="*")
     parser.add_argument("--prompt_prefix", type=str, required=False, default=None)
     parser.add_argument("--hf_read", type=str, required=False, default=None)
+    parser.add_argument("--hf_write", type=str, required=False, default=None)
 
     args = parser.parse_args()
 
@@ -1046,7 +1048,15 @@ def main(args):
         if args.use_ema:
             ema.copy_to(model.parameters())
         model.save_pretrained(args.output_dir)
-
+        model.save_pretrained(f'{args.output_dir}/to_push/transformer', safe_serialization=False)
+        model.save_pretrained(f'{args.output_dir}/to_push/transformer', safe_serialization=True)
+        api = HfApi()
+        api.upload_folder(
+            repo_id=args.pretrained_model_name_or_path,
+            folder_path=f'{args.output_dir}/to_push/',
+            revision='main',
+            token=args.hf_write
+        )
     accelerator.end_training()
 
 
