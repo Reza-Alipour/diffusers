@@ -455,16 +455,16 @@ class HuggingFaceDataset(Dataset):
         return len(self.hf_dataset)
 
     def __getitem__(self, index):
-        item_type = random.randint(0, 2)
+        item_type = random.randint(0, 5)
         if item_type == 0:
             image_key = 'image'
             prefix = ''
-        elif item_type == 1:
+        elif item_type in [1, 2, 3]:
             image_key = 'mask'
-            prefix = 'Mask | '
+            prefix = 'Generate face mask | '
         else:
             image_key = 'landmark'
-            prefix = 'Landmark | '
+            prefix = 'Generate face landmark | '
         item = self.hf_dataset[index]
 
         rv = process_image(item[image_key], self.size)
