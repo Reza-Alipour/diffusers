@@ -382,8 +382,8 @@ def parse_args():
         if not os.path.exists(args.instance_data_image):
             raise ValueError(f"Does not exist: `--args.instance_data_image` {args.instance_data_image}")
 
-    if args.instance_data_dataset is not None and (args.image_key is None or args.prompt_key is None):
-        raise ValueError("`--instance_data_dataset` requires setting `--image_key` and `--prompt_key`")
+    # if args.instance_data_dataset is not None and (args.image_key is None or args.prompt_key is None):
+    #     raise ValueError("`--instance_data_dataset` requires setting `--image_key` and `--prompt_key`")
 
     return args
 
@@ -459,7 +459,7 @@ class HuggingFaceDataset(Dataset):
         if item_type == 0:
             image_key = 'image'
             prefix = ''
-        elif item_type in [1, 2, 3]:
+        elif item_type in [1, 2, 3, 4]:
             image_key = 'mask'
             prefix = 'Generate face mask | '
         else:
