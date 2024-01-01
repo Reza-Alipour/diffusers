@@ -114,28 +114,6 @@ if is_wandb_available():
     import wandb
 
 logger = get_logger(__name__, log_level="INFO")
-'''
-python train_amused.py \
-    --pretrained_model_name_or_path "reza-alipour/Muse-Face" \
-    --instance_data_dataset "reza-alipour/M3TM" \
-    --use_8bit_adam \
-    --seed 1337 \
-    --checkpointing_steps 1000 \
-    --checkpoints_total_limit 3 \
-    --train_batch_size 8 \
-    --gradient_accumulation_steps 16 \
-    --learning_rate 5e-5 \
-    --lr_warmup_steps 500 \
-    --validation_steps 100 \
-    --mixed_precision no \
-    --resolution 256 \
-    --validation_prompts """""" \
-    --mclip \
-    --dataset_splits """ \
-
-
-
-'''
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -408,7 +386,9 @@ class InstanceDataRootDataset(Dataset):
         rv = process_image(instance_image, self.size)
 
         prompt = os.path.splitext(os.path.basename(image_path))[0]
-        rv["prompt_input_ids"] = tokenize_prompt(self.tokenizer, prompt)[0]
+        input_ids, attention_masks = tokenize_prompt(self.tokenizer, prompt)
+        rv["prompt_input_ids"] = input_ids[0]
+        rv["prompt_attention_masks"] = attention_masks[0]
         return rv
 
 
@@ -474,7 +454,9 @@ class HuggingFaceDataset(Dataset):
         if self.prompt_prefix is not None:
             prompt = self.prompt_prefix + prompt
 
-        rv["prompt_input_ids"] = tokenize_prompt(self.tokenizer, prompt)[0]
+        input_ids, attention_masks = tokenize_prompt(self.tokenizer, prompt)
+        rv["prompt_input_ids"] = input_ids[0]
+        rv["prompt_attention_masks"] = attention_masks[0]
 
         return rv
 
@@ -485,10 +467,9 @@ def process_image(image, size):
     if not image.mode == "RGB":
         image = image.convert("RGB")
 
+    image = transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR)(image)
     orig_height = image.height
     orig_width = image.width
-
-    image = transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR)(image)
 
     c_top, c_left, _, _ = transforms.RandomCrop.get_params(image, output_size=(size, size))
     image = transforms.functional.crop(image, c_top, c_left, size, size)
@@ -503,17 +484,18 @@ def process_image(image, size):
 
 
 def tokenize_prompt(tokenizer, prompt):
-    return tokenizer(
+    tokenized_prompt = tokenizer(
         prompt,
         truncation=True,
         padding="max_length",
         max_length=77,
         return_tensors="pt",
-    ).input_ids
+    )
+    return tokenized_prompt.input_ids, tokenized_prompt.attention_mask
 
 
-def encode_prompt(text_encoder, input_ids):
-    outputs = text_encoder(input_ids, return_dict=True, output_hidden_states=True)
+def encode_prompt(text_encoder, input_ids, attention_mask):
+    outputs = text_encoder(input_ids, return_dict=True, output_hidden_states=True, attention_mask=attention_mask)
     encoder_hidden_states = outputs.hidden_states[-2]
     cond_embeds = outputs[0]
     return encoder_hidden_states, cond_embeds
@@ -806,15 +788,21 @@ def main(args):
         ema.to(accelerator.device)
 
     with nullcontext() if args.train_text_encoder else torch.no_grad():
+        input_ids, attention_masks = tokenize_prompt(tokenizer, "")
         empty_embeds, empty_clip_embeds = encode_prompt(
-            text_encoder, tokenize_prompt(tokenizer, "").to(text_encoder.device, non_blocking=True)
+            text_encoder,
+            input_ids.to(text_encoder.device, non_blocking=True),
+            attention_masks.to(text_encoder.device, non_blocking=True)
         )
 
         # There is a single image, we can just pre-encode the single prompt
         if args.instance_data_image is not None:
             prompt = os.path.splitext(os.path.basename(args.instance_data_image))[0]
+            input_ids, attention_masks = tokenize_prompt(tokenizer, prompt)
             encoder_hidden_states, cond_embeds = encode_prompt(
-                text_encoder, tokenize_prompt(tokenizer, prompt).to(text_encoder.device, non_blocking=True)
+                text_encoder,
+                input_ids.to(text_encoder.device, non_blocking=True),
+                attention_masks.to(text_encoder.device, non_blocking=True)
             )
             encoder_hidden_states = encoder_hidden_states.repeat(args.train_batch_size, 1, 1)
             cond_embeds = cond_embeds.repeat(args.train_batch_size, 1)
@@ -924,7 +912,9 @@ def main(args):
             if "prompt_input_ids" in batch:
                 with nullcontext() if args.train_text_encoder else torch.no_grad():
                     encoder_hidden_states, cond_embeds = encode_prompt(
-                        text_encoder, batch["prompt_input_ids"].to(accelerator.device, non_blocking=True)
+                        text_encoder,
+                        batch["prompt_input_ids"].to(accelerator.device, non_blocking=True),
+                        batch["prompt_attention_masks"].to(accelerator.device, non_blocking=True)
                     )
 
             # Train Step

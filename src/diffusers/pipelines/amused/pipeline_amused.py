@@ -196,15 +196,20 @@ class AmusedPipeline(DiffusionPipeline):
             width = self.transformer.config.sample_size * self.vae_scale_factor
 
         if prompt_embeds is None:
-            input_ids = self.tokenizer(
+            tokenized_prompt = self.tokenizer(
                 prompt,
                 return_tensors="pt",
                 padding="max_length",
                 truncation=True,
                 max_length=self.tokenizer.model_max_length,
-            ).input_ids.to(self._execution_device)
+            )
+            input_ids = tokenized_prompt.input_ids.to(self._execution_device)
+            attention_masks = tokenized_prompt.attention_mask.to(self._execution_device)
 
-            outputs = self.text_encoder(input_ids, return_dict=True, output_hidden_states=True)
+            outputs = self.text_encoder(input_ids,
+                                        return_dict=True,
+                                        output_hidden_states=True,
+                                        attention_mask=attention_masks)
             prompt_embeds = outputs.text_embeds
             encoder_hidden_states = outputs.hidden_states[-2]
 
@@ -219,15 +224,20 @@ class AmusedPipeline(DiffusionPipeline):
                 if isinstance(negative_prompt, str):
                     negative_prompt = [negative_prompt]
 
-                input_ids = self.tokenizer(
+                tokenized_prompt = self.tokenizer(
                     negative_prompt,
                     return_tensors="pt",
                     padding="max_length",
                     truncation=True,
                     max_length=self.tokenizer.model_max_length,
-                ).input_ids.to(self._execution_device)
+                )
+                input_ids = tokenized_prompt.input_ids.to(self._execution_device)
+                attention_masks = tokenized_prompt.attention_mask.to(self._execution_device)
 
-                outputs = self.text_encoder(input_ids, return_dict=True, output_hidden_states=True)
+                outputs = self.text_encoder(input_ids,
+                                            return_dict=True,
+                                            output_hidden_states=True,
+                                            attention_mask=attention_masks)
                 negative_prompt_embeds = outputs.text_embeds
                 negative_encoder_hidden_states = outputs.hidden_states[-2]
 
